@@ -159,6 +159,7 @@ final class HotkeyStore: ObservableObject {
     @Published private(set) var space8Hotkey: HotkeyCombination
     @Published private(set) var space9Hotkey: HotkeyCombination
     @Published private(set) var space10Hotkey: HotkeyCombination
+    @Published private(set) var enabledStates: [HotkeyIdentifier: Bool] = [:]
 
     private let defaults: UserDefaults
 
@@ -176,6 +177,11 @@ final class HotkeyStore: ObservableObject {
         space8Hotkey = defaults.hotkey(forKey: DefaultsKey.space8.rawValue) ?? .defaultForSpace(8)
         space9Hotkey = defaults.hotkey(forKey: DefaultsKey.space9.rawValue) ?? .defaultForSpace(9)
         space10Hotkey = defaults.hotkey(forKey: DefaultsKey.space10.rawValue) ?? .defaultForSpace(10)
+        
+        for identifier in HotkeyIdentifier.allCases {
+            let key = "enabled.\(identifier.rawValue)"
+            enabledStates[identifier] = defaults.object(forKey: key) as? Bool ?? true
+        }
     }
 
     func update(_ combination: HotkeyCombination, for identifier: HotkeyIdentifier) {
@@ -234,8 +240,29 @@ final class HotkeyStore: ObservableObject {
     func resetToDefaults() {
         leftHotkey = .defaultLeft
         rightHotkey = .defaultRight
+        space1Hotkey = .defaultForSpace(1)
+        space2Hotkey = .defaultForSpace(2)
+        space3Hotkey = .defaultForSpace(3)
+        space4Hotkey = .defaultForSpace(4)
+        space5Hotkey = .defaultForSpace(5)
+        space6Hotkey = .defaultForSpace(6)
+        space7Hotkey = .defaultForSpace(7)
+        space8Hotkey = .defaultForSpace(8)
+        space9Hotkey = .defaultForSpace(9)
+        space10Hotkey = .defaultForSpace(10)
+        
         defaults.setHotkey(leftHotkey, forKey: DefaultsKey.left.rawValue)
         defaults.setHotkey(rightHotkey, forKey: DefaultsKey.right.rawValue)
+        defaults.setHotkey(space1Hotkey, forKey: DefaultsKey.space1.rawValue)
+        defaults.setHotkey(space2Hotkey, forKey: DefaultsKey.space2.rawValue)
+        defaults.setHotkey(space3Hotkey, forKey: DefaultsKey.space3.rawValue)
+        defaults.setHotkey(space4Hotkey, forKey: DefaultsKey.space4.rawValue)
+        defaults.setHotkey(space5Hotkey, forKey: DefaultsKey.space5.rawValue)
+        defaults.setHotkey(space6Hotkey, forKey: DefaultsKey.space6.rawValue)
+        defaults.setHotkey(space7Hotkey, forKey: DefaultsKey.space7.rawValue)
+        defaults.setHotkey(space8Hotkey, forKey: DefaultsKey.space8.rawValue)
+        defaults.setHotkey(space9Hotkey, forKey: DefaultsKey.space9.rawValue)
+        defaults.setHotkey(space10Hotkey, forKey: DefaultsKey.space10.rawValue)
     }
 
     func combination(for identifier: HotkeyIdentifier) -> HotkeyCombination {
@@ -253,6 +280,16 @@ final class HotkeyStore: ObservableObject {
         case .space9: return space9Hotkey
         case .space10: return space10Hotkey
         }
+    }
+    
+    func isEnabled(_ identifier: HotkeyIdentifier) -> Bool {
+        return enabledStates[identifier] ?? true
+    }
+    
+    func setEnabled(_ enabled: Bool, for identifier: HotkeyIdentifier) {
+        enabledStates[identifier] = enabled
+        let key = "enabled.\(identifier.rawValue)"
+        defaults.set(enabled, forKey: key)
     }
 
     private enum DefaultsKey: String {

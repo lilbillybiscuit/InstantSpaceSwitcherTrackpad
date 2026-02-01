@@ -33,11 +33,18 @@ typedef struct {
 bool iss_switch(ISSDirection direction);
 
 /**
- * @brief Retrieves the current space info for the active menu-bar display.
+ * @brief Retrieves the current space info for the display where the cursor is located.
  * @param info Output pointer that receives the info struct.
  * @return true on success, false if unavailable (e.g. API failure)
  */
 bool iss_get_space_info(ISSSpaceInfo *info);
+
+/**
+ * @brief Retrieves the current space info for the active menu-bar display.
+ * @param info Output pointer that receives the info struct.
+ * @return true on success, false if unavailable (e.g. API failure)
+ */
+bool iss_get_menubar_space_info(ISSSpaceInfo *info);
 
 /**
  * @brief Determines if a move in the given direction is allowed for the info.

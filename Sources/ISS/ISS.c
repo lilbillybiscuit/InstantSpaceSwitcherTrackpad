@@ -61,7 +61,7 @@ static bool extract_space_info_from_display(CFDictionaryRef displayDict,
                                             CGSSpaceID activeSpace,
                                             bool hasActiveSpace,
                                             ISSSpaceInfo *outInfo);
-static bool load_space_info(ISSSpaceInfo *info);
+static bool load_space_info_for_display(ISSSpaceInfo *info, bool useCursorDisplay);
 static bool iss_post_switch_gesture(ISSDirection direction);
 static bool iss_switch_with_info(const ISSSpaceInfo *info, ISSDirection direction);
 static bool iss_should_block_switch(const ISSSpaceInfo *info, ISSDirection direction);
@@ -94,6 +94,21 @@ static bool extract_space_info_from_display(CFDictionaryRef displayDict,
         return false;
     }
 
+    // Try to get current space from display dict (more accurate per-display)
+    CGSSpaceID displayActiveSpace = 0;
+    const void *currentSpaceValue = CFDictionaryGetValue(displayDict, CFSTR("Current Space"));
+    if (currentSpaceValue && CFGetTypeID(currentSpaceValue) == CFDictionaryGetTypeID()) {
+        CFDictionaryRef currentSpaceDict = (CFDictionaryRef)currentSpaceValue;
+        CFNumberRef currentSpaceID = (CFNumberRef)CFDictionaryGetValue(currentSpaceDict, CFSTR("id64"));
+        if (currentSpaceID && CFGetTypeID(currentSpaceID) == CFNumberGetTypeID()) {
+            CFNumberGetValue(currentSpaceID, kCFNumberSInt64Type, &displayActiveSpace);
+        }
+    }
+    
+    // Use display-specific active space if available, otherwise use global
+    CGSSpaceID targetActiveSpace = displayActiveSpace != 0 ? displayActiveSpace : activeSpace;
+    bool hasTargetActiveSpace = displayActiveSpace != 0 || hasActiveSpace;
+
     CFArrayRef spaces = (CFArrayRef)spacesValue;
     const CFIndex spaceCount = CFArrayGetCount(spaces);
 
@@ -115,7 +130,7 @@ static bool extract_space_info_from_display(CFDictionaryRef displayDict,
 
         CGSSpaceID candidate = 0;
         if (CFNumberGetValue(idNumber, kCFNumberSInt64Type, &candidate)) {
-            if (!foundActive && hasActiveSpace && candidate == activeSpace) {
+            if (!foundActive && hasTargetActiveSpace && candidate == targetActiveSpace) {
                 activeIndex = totalSpaces;
                 foundActive = true;
             }
@@ -123,7 +138,7 @@ static bool extract_space_info_from_display(CFDictionaryRef displayDict,
         }
     }
 
-    if (totalSpaces == 0 || (hasActiveSpace && !foundActive)) {
+    if (totalSpaces == 0 || (hasTargetActiveSpace && !foundActive)) {
         return false;
     }
 
@@ -132,7 +147,7 @@ static bool extract_space_info_from_display(CFDictionaryRef displayDict,
     return true;
 }
 
-static bool load_space_info(ISSSpaceInfo *info) {
+static bool load_space_info_for_display(ISSSpaceInfo *info, bool useCursorDisplay) {
     if (!cgs_symbols_available()) {
         fprintf(stderr, "ISS: required CGS symbols missing\n");
         return false;
@@ -156,9 +171,30 @@ static bool load_space_info(ISSSpaceInfo *info) {
         }
     }
 
+    // Get display identifier based on mode
     CFStringRef activeDisplayIdentifier = NULL;
-    if (&CGSCopyActiveMenuBarDisplayIdentifier != NULL) {
-        activeDisplayIdentifier = CGSCopyActiveMenuBarDisplayIdentifier(connection);
+    
+    if (useCursorDisplay) {
+        // Get display where cursor is located
+        CGEventRef tempEvent = CGEventCreate(NULL);
+        CGPoint cursorLocation = CGEventGetLocation(tempEvent);
+        CFRelease(tempEvent);
+        
+        CGDirectDisplayID cursorDisplay = 0;
+        uint32_t cursorDisplayCount = 0;
+        
+        if (CGGetDisplaysWithPoint(cursorLocation, 1, &cursorDisplay, &cursorDisplayCount) == kCGErrorSuccess && cursorDisplayCount > 0) {
+            CFUUIDRef displayUUID = CGDisplayCreateUUIDFromDisplayID(cursorDisplay);
+            if (displayUUID) {
+                activeDisplayIdentifier = CFUUIDCreateString(NULL, displayUUID);
+                CFRelease(displayUUID);
+            }
+        }
+    } else {
+        // Get menubar display
+        if (&CGSCopyActiveMenuBarDisplayIdentifier != NULL) {
+            activeDisplayIdentifier = CGSCopyActiveMenuBarDisplayIdentifier(connection);
+        }
     }
 
     CFArrayRef displays = CGSCopyManagedDisplaySpaces(connection, activeDisplayIdentifier);
@@ -353,7 +389,16 @@ bool iss_get_space_info(ISSSpaceInfo *info) {
     }
 
     memset(info, 0, sizeof(*info));
-    return load_space_info(info);
+    return load_space_info_for_display(info, true);
+}
+
+bool iss_get_menubar_space_info(ISSSpaceInfo *info) {
+    if (!info) {
+        return false;
+    }
+
+    memset(info, 0, sizeof(*info));
+    return load_space_info_for_display(info, false);
 }
 
 static bool iss_switch_with_info(const ISSSpaceInfo *info, ISSDirection direction) {
@@ -397,12 +442,16 @@ bool iss_switch_to_index(unsigned int targetIndex) {
     ISSDirection direction = info.currentIndex < targetIndex ? ISSDirectionRight : ISSDirectionLeft;
     unsigned int steps = direction == ISSDirectionRight ? (targetIndex - info.currentIndex) : (info.currentIndex - targetIndex);
 
+    // Post gestures directly without per-step bounds checking since we've validated target
     for (unsigned int i = 0; i < steps; i++) {
-        if (!iss_switch(direction)) {
+        if (!iss_post_switch_gesture(direction)) {
             return false;
         }
+        // Small delay between gestures to let system process them
+        usleep(50000); // 50ms
     }
 
+    // Verify we reached the target
     if (!iss_get_space_info(&info)) {
         return false;
     }

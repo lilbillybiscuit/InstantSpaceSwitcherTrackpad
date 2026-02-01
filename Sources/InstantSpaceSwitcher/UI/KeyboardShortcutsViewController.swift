@@ -19,6 +19,7 @@ final class KeyboardShortcutsViewController: NSViewController {
         let identifier: HotkeyIdentifier
         let name: String
         var combination: HotkeyCombination
+        var isEnabled: Bool
     }
     
     private var shortcuts: [ShortcutRow] = []
@@ -36,14 +37,19 @@ final class KeyboardShortcutsViewController: NSViewController {
     }
     
     private func setupTableView() {
+        let enabledColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("enabled"))
+        enabledColumn.title = "Enabled"
+        enabledColumn.width = 80
+        tableView.addTableColumn(enabledColumn)
+        
         let nameColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
         nameColumn.title = "Action"
-        nameColumn.width = 200
+        nameColumn.width = 180
         tableView.addTableColumn(nameColumn)
         
         let shortcutColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("shortcut"))
         shortcutColumn.title = "Shortcut"
-        shortcutColumn.width = 250
+        shortcutColumn.width = 210
         tableView.addTableColumn(shortcutColumn)
         
         tableView.delegate = self
@@ -58,30 +64,37 @@ final class KeyboardShortcutsViewController: NSViewController {
         scrollView.borderType = .bezelBorder
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         
+        let resetAllButton = NSButton(title: "Reset All to Defaults", target: self, action: #selector(resetAllShortcuts))
+        resetAllButton.translatesAutoresizingMaskIntoConstraints = false
+        
         view.addSubview(scrollView)
+        view.addSubview(resetAllButton)
         
         NSLayoutConstraint.activate([
             scrollView.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
             scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
-            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20)
+            scrollView.bottomAnchor.constraint(equalTo: resetAllButton.topAnchor, constant: -12),
+            
+            resetAllButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            resetAllButton.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20)
         ])
     }
     
     private func loadShortcuts() {
         shortcuts = [
-            ShortcutRow(identifier: .left, name: "Switch to space on the left", combination: store.leftHotkey),
-            ShortcutRow(identifier: .right, name: "Switch to space on the right", combination: store.rightHotkey),
-            ShortcutRow(identifier: .space1, name: "Switch to space 1", combination: store.space1Hotkey),
-            ShortcutRow(identifier: .space2, name: "Switch to space 2", combination: store.space2Hotkey),
-            ShortcutRow(identifier: .space3, name: "Switch to space 3", combination: store.space3Hotkey),
-            ShortcutRow(identifier: .space4, name: "Switch to space 4", combination: store.space4Hotkey),
-            ShortcutRow(identifier: .space5, name: "Switch to space 5", combination: store.space5Hotkey),
-            ShortcutRow(identifier: .space6, name: "Switch to space 6", combination: store.space6Hotkey),
-            ShortcutRow(identifier: .space7, name: "Switch to space 7", combination: store.space7Hotkey),
-            ShortcutRow(identifier: .space8, name: "Switch to space 8", combination: store.space8Hotkey),
-            ShortcutRow(identifier: .space9, name: "Switch to space 9", combination: store.space9Hotkey),
-            ShortcutRow(identifier: .space10, name: "Switch to space 10", combination: store.space10Hotkey)
+            ShortcutRow(identifier: .left, name: "Switch to space on the left", combination: store.leftHotkey, isEnabled: store.isEnabled(.left)),
+            ShortcutRow(identifier: .right, name: "Switch to space on the right", combination: store.rightHotkey, isEnabled: store.isEnabled(.right)),
+            ShortcutRow(identifier: .space1, name: "Switch to space 1", combination: store.space1Hotkey, isEnabled: store.isEnabled(.space1)),
+            ShortcutRow(identifier: .space2, name: "Switch to space 2", combination: store.space2Hotkey, isEnabled: store.isEnabled(.space2)),
+            ShortcutRow(identifier: .space3, name: "Switch to space 3", combination: store.space3Hotkey, isEnabled: store.isEnabled(.space3)),
+            ShortcutRow(identifier: .space4, name: "Switch to space 4", combination: store.space4Hotkey, isEnabled: store.isEnabled(.space4)),
+            ShortcutRow(identifier: .space5, name: "Switch to space 5", combination: store.space5Hotkey, isEnabled: store.isEnabled(.space5)),
+            ShortcutRow(identifier: .space6, name: "Switch to space 6", combination: store.space6Hotkey, isEnabled: store.isEnabled(.space6)),
+            ShortcutRow(identifier: .space7, name: "Switch to space 7", combination: store.space7Hotkey, isEnabled: store.isEnabled(.space7)),
+            ShortcutRow(identifier: .space8, name: "Switch to space 8", combination: store.space8Hotkey, isEnabled: store.isEnabled(.space8)),
+            ShortcutRow(identifier: .space9, name: "Switch to space 9", combination: store.space9Hotkey, isEnabled: store.isEnabled(.space9)),
+            ShortcutRow(identifier: .space10, name: "Switch to space 10", combination: store.space10Hotkey, isEnabled: store.isEnabled(.space10))
         ]
         tableView.reloadData()
     }
@@ -112,7 +125,21 @@ extension KeyboardShortcutsViewController: NSTableViewDelegate {
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let shortcut = shortcuts[row]
         
-        if tableColumn?.identifier.rawValue == "name" {
+        if tableColumn?.identifier.rawValue == "enabled" {
+            let cellView = NSTableCellView()
+            let checkbox = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleEnabled(_:)))
+            checkbox.state = shortcut.isEnabled ? .on : .off
+            checkbox.tag = row
+            checkbox.translatesAutoresizingMaskIntoConstraints = false
+            cellView.addSubview(checkbox)
+            
+            NSLayoutConstraint.activate([
+                checkbox.centerXAnchor.constraint(equalTo: cellView.centerXAnchor),
+                checkbox.centerYAnchor.constraint(equalTo: cellView.centerYAnchor)
+            ])
+            
+            return cellView
+        } else if tableColumn?.identifier.rawValue == "name" {
             let cellView = NSTableCellView()
             let textField = NSTextField(labelWithString: shortcut.name)
             textField.translatesAutoresizingMaskIntoConstraints = false
@@ -171,8 +198,34 @@ extension KeyboardShortcutsViewController: NSTableViewDelegate {
         guard row < shortcuts.count else { return }
         
         let identifier = shortcuts[row].identifier
-        let defaultCombination: HotkeyCombination = identifier == .left ? .defaultLeft : .defaultRight
+        let defaultCombination: HotkeyCombination
+        switch identifier {
+        case .left: defaultCombination = .defaultLeft
+        case .right: defaultCombination = .defaultRight
+        case .space1: defaultCombination = .defaultForSpace(1)
+        case .space2: defaultCombination = .defaultForSpace(2)
+        case .space3: defaultCombination = .defaultForSpace(3)
+        case .space4: defaultCombination = .defaultForSpace(4)
+        case .space5: defaultCombination = .defaultForSpace(5)
+        case .space6: defaultCombination = .defaultForSpace(6)
+        case .space7: defaultCombination = .defaultForSpace(7)
+        case .space8: defaultCombination = .defaultForSpace(8)
+        case .space9: defaultCombination = .defaultForSpace(9)
+        case .space10: defaultCombination = .defaultForSpace(10)
+        }
         store.update(defaultCombination, for: identifier)
+    }
+    
+    @objc private func resetAllShortcuts() {
+        store.resetToDefaults()
+    }
+    
+    @objc private func toggleEnabled(_ sender: NSButton) {
+        let row = sender.tag
+        guard row < shortcuts.count else { return }
+        
+        let identifier = shortcuts[row].identifier
+        store.setEnabled(sender.state == .on, for: identifier)
     }
     
     private func handleRecordingResult(_ combination: HotkeyCombination, for identifier: HotkeyIdentifier) {

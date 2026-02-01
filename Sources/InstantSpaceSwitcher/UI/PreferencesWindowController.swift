@@ -25,7 +25,6 @@ final class PreferencesWindowController: NSWindowController {
         // Check accessibility permissions
         if !AXIsProcessTrusted() {
             showAccessibilityAlert()
-            return
         }
         
         NSApp.activate(ignoringOtherApps: true)

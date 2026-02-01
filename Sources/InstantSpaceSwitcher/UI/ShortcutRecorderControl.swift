@@ -128,6 +128,13 @@ final class ShortcutRecorderControl: NSView {
     override func mouseDown(with event: NSEvent) {
         print("[ShortcutRecorder] mouseDown triggered")
         
+        // Check accessibility permissions before starting recording
+        if !AXIsProcessTrusted() {
+            print("[ShortcutRecorder] Accessibility permission not granted")
+            showAccessibilityAlert()
+            return
+        }
+        
         // Stop any other active recorder
         if let activeRecorder = Self.activeRecorder, activeRecorder !== self {
             print("[ShortcutRecorder] Stopping other active recorder")
@@ -137,6 +144,25 @@ final class ShortcutRecorderControl: NSView {
         if !isRecording {
             print("[ShortcutRecorder] Starting recording")
             isRecording = true
+        }
+    }
+    
+    private func showAccessibilityAlert() {
+        NSApp.activate(ignoringOtherApps: true)
+        
+        let alert = NSAlert()
+        alert.messageText = "Accessibility Permission Required"
+        alert.informativeText = "\(Constants.appName) needs Accessibility permissions to record keyboard shortcuts.\n\nPlease enable it in System Settings > Privacy & Security > Accessibility."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Open System Settings")
+        alert.addButton(withTitle: "Cancel")
+        
+        let response = alert.runModal()
+        
+        if response == .alertFirstButtonReturn {
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                NSWorkspace.shared.open(url)
+            }
         }
     }
 }

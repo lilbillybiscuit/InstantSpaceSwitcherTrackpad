@@ -117,10 +117,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyStore.$space8Hotkey.receive(on: RunLoop.main).sink { [weak self] in self?.registerHotkey(for: .space8, combination: $0) }.store(in: &cancellables)
         hotkeyStore.$space9Hotkey.receive(on: RunLoop.main).sink { [weak self] in self?.registerHotkey(for: .space9, combination: $0) }.store(in: &cancellables)
         hotkeyStore.$space10Hotkey.receive(on: RunLoop.main).sink { [weak self] in self?.registerHotkey(for: .space10, combination: $0) }.store(in: &cancellables)
+        
+        hotkeyStore.$enabledStates.receive(on: RunLoop.main).sink { [weak self] _ in
+            guard let self = self else { return }
+            for identifier in HotkeyIdentifier.allCases {
+                self.registerHotkey(for: identifier, combination: self.hotkeyStore.combination(for: identifier))
+            }
+        }.store(in: &cancellables)
     }
     
     private func registerHotkey(for identifier: HotkeyIdentifier, combination: HotkeyCombination) {
         menuBarController.applyHotkey(combination, to: identifier)
+        
+        guard hotkeyStore.isEnabled(identifier) else {
+            HotKeyManager.shared.unregister(identifier: identifier)
+            return
+        }
         
         HotKeyManager.shared.register(identifier: identifier, combination: combination) { [weak self] in
             guard let self else { return }
@@ -154,22 +166,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     private func performSpaceSwitch(_ direction: ISSDirection) {
+        // Get current space info for cursor display BEFORE switch to calculate target
+        var info = ISSSpaceInfo()
+        let hasInfo = iss_get_space_info(&info)
+        
+        // Calculate target before attempting switch
+        var targetIndex: UInt32 = 0
+        if hasInfo {
+            if direction == ISSDirectionLeft {
+                targetIndex = info.currentIndex > 0 ? info.currentIndex - 1 : info.currentIndex
+            } else {
+                targetIndex = info.currentIndex + 1 < info.spaceCount ? info.currentIndex + 1 : info.currentIndex
+            }
+        }
+        
         if !iss_switch(direction) {
             NSSound.beep()
+            return
         }
-        menuBarController.scheduleRefresh(after: 0.2)
+        
+        // Update menubar space info only on successful switch
+        refreshSpaceInfo()
+        
+        // Show OSD with target space number only on successful switch
+        if hasInfo {
+            OSDWindow.shared.show(message: "\(targetIndex + 1)")
+        }
     }
     
     private func performSpaceSwitchToIndex(_ index: UInt32) {
         if !iss_switch_to_index(index) {
             NSSound.beep()
+            return
         }
-        menuBarController.scheduleRefresh(after: 0.2)
+        
+        // Update menubar space info
+        refreshSpaceInfo()
+        
+        // Show OSD with target space number only
+        OSDWindow.shared.show(message: "\(index + 1)")
     }
     
     private func refreshSpaceInfo() {
         var info = ISSSpaceInfo()
-        if iss_get_space_info(&info) {
+        if iss_get_menubar_space_info(&info) {
             menuBarController.updateWithSpaceInfo(info)
         } else {
             menuBarController.updateWithSpaceInfo(nil)
