@@ -250,6 +250,26 @@ final class HotkeyPreferencesView: NSView {
             store.update(.defaultLeft, for: .left)
         case .right:
             store.update(.defaultRight, for: .right)
+        case .space1:
+            store.update(.defaultForSpace(1), for: .space1)
+        case .space2:
+            store.update(.defaultForSpace(2), for: .space2)
+        case .space3:
+            store.update(.defaultForSpace(3), for: .space3)
+        case .space4:
+            store.update(.defaultForSpace(4), for: .space4)
+        case .space5:
+            store.update(.defaultForSpace(5), for: .space5)
+        case .space6:
+            store.update(.defaultForSpace(6), for: .space6)
+        case .space7:
+            store.update(.defaultForSpace(7), for: .space7)
+        case .space8:
+            store.update(.defaultForSpace(8), for: .space8)
+        case .space9:
+            store.update(.defaultForSpace(9), for: .space9)
+        case .space10:
+            store.update(.defaultForSpace(10), for: .space10)
         }
         setStatus("Reset \(identifier.displayName) shortcut.", color: .labelColor)
     }
@@ -270,10 +290,18 @@ final class HotkeyPreferencesView: NSView {
 private extension HotkeyIdentifier {
     var displayName: String {
         switch self {
-        case .left:
-            return "Switch Left"
-        case .right:
-            return "Switch Right"
+        case .left: return "Switch Left"
+        case .right: return "Switch Right"
+        case .space1: return "Space 1"
+        case .space2: return "Space 2"
+        case .space3: return "Space 3"
+        case .space4: return "Space 4"
+        case .space5: return "Space 5"
+        case .space6: return "Space 6"
+        case .space7: return "Space 7"
+        case .space8: return "Space 8"
+        case .space9: return "Space 9"
+        case .space10: return "Space 10"
         }
     }
     
@@ -281,6 +309,7 @@ private extension HotkeyIdentifier {
         switch self {
         case .left: return .right
         case .right: return .left
+        default: return .left
         }
     }
 }
