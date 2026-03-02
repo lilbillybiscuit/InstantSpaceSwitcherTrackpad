@@ -444,11 +444,9 @@ bool iss_switch_to_index(unsigned int targetIndex) {
 
     // Post gestures directly without per-step bounds checking since we've validated target
     for (unsigned int i = 0; i < steps; i++) {
-        if (!iss_post_switch_gesture(direction)) {
+        if (!iss_switch(direction)) {
             return false;
         }
-        // Small delay between gestures to let system process them
-        usleep(50000); // 50ms
     }
 
     // Verify we reached the target
