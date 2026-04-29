@@ -4,8 +4,11 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CGEventTypes.h>
 #include <float.h>
+#include <math.h>
+#include <os/log.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <strings.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -46,6 +49,14 @@ typedef CF_ENUM(uint16_t, CGGestureMotion) {
     kCGGestureMotionHorizontal = 1,
 };
 
+typedef CF_ENUM(uint8_t, ISSGestureTrackingState) {
+    ISSGestureStateIdle = 0,
+    ISSGestureStateTrackingCandidate = 1,
+    ISSGestureStateTrackingSpaceSwipe = 2,
+    ISSGestureStateFinishing = 3,
+    ISSGestureStateCooldown = 4,
+};
+
 typedef int32_t CGSConnectionID;
 typedef uint64_t CGSSpaceID;
 
@@ -57,21 +68,84 @@ extern CGSSpaceID CGSGetActiveSpace(CGSConnectionID connection) __attribute__((w
 static CFMachPortRef globalTap = NULL;
 static CFRunLoopSourceRef globalSource = NULL;
 
+static bool testingEnabled = false;
+static ISSSpaceInfo testingSpaceInfo = {0, 0};
+
+static bool gestureLoggingEnabled = false;
+static bool gestureCompletionEnabled = false;
+static os_log_t gestureLog = NULL;
+
+static struct {
+    ISSGestureTrackingState state;
+    ISSDirection direction;
+    double lastProgress;
+    double lastVelocityX;
+    double lastTimestamp;
+    double cooldownUntil;
+    double selfInjectionUntil;
+    unsigned int completionCount;
+} gestureTracker = {0};
+
 static bool extract_space_info_from_display(CFDictionaryRef displayDict,
                                             CGSSpaceID activeSpace,
                                             bool hasActiveSpace,
                                             ISSSpaceInfo *outInfo);
 static bool load_space_info_for_display(ISSSpaceInfo *info, bool useCursorDisplay);
+static void iss_load_gesture_options(void);
+static void iss_reset_gesture_tracker(void);
+static bool iss_handle_gesture_snapshot(CGSEventType cgsType,
+                                        int64_t hidType,
+                                        int64_t phase,
+                                        double progress,
+                                        double velocityX,
+                                        double velocityY,
+                                        int64_t flags,
+                                        int64_t motion,
+                                        double timestamp);
 static bool iss_post_switch_gesture(ISSDirection direction);
+static bool iss_post_finish_gesture(ISSDirection direction);
+static void iss_post_gesture_completion_notification(unsigned int targetIndex);
 static bool iss_switch_with_info(const ISSSpaceInfo *info, ISSDirection direction);
 static bool iss_should_block_switch(const ISSSpaceInfo *info, ISSDirection direction);
 
-// Event tap callback (required but can be empty)
 static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type, 
                                    CGEventRef event, void *refcon) {
     (void)proxy;
-    (void)type;
     (void)refcon;
+
+    if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
+        if (globalTap) {
+            CGEventTapEnable(globalTap, true);
+        }
+        if (gestureLoggingEnabled && gestureLog) {
+            os_log_info(gestureLog, "event tap re-enabled after disabled type=%d", type);
+        }
+        return event;
+    }
+
+    CGSEventType cgsType = (CGSEventType)CGEventGetIntegerValueField(event, kCGSEventTypeField);
+    if (type == kCGEventScrollWheel ||
+        cgsType == kCGSEventScrollWheel ||
+        cgsType == kCGSEventZoom ||
+        cgsType == kCGSEventGesture ||
+        cgsType == kCGSEventDockControl ||
+        cgsType == kCGSEventFluidTouchGesture) {
+        bool handled = iss_handle_gesture_snapshot(
+            cgsType,
+            CGEventGetIntegerValueField(event, kCGEventGestureHIDType),
+            CGEventGetIntegerValueField(event, kCGEventGesturePhase),
+            CGEventGetDoubleValueField(event, kCGEventGestureSwipeProgress),
+            CGEventGetDoubleValueField(event, kCGEventGestureSwipeVelocityX),
+            CGEventGetDoubleValueField(event, kCGEventGestureSwipeVelocityY),
+            CGEventGetIntegerValueField(event, kCGEventScrollGestureFlagBits),
+            CGEventGetIntegerValueField(event, kCGEventGestureSwipeMotion),
+            CFAbsoluteTimeGetCurrent()
+        );
+        if (handled) {
+            return NULL;
+        }
+    }
+
     return event;
 }
 
@@ -79,6 +153,264 @@ static bool cgs_symbols_available(void) {
     return (&CGSMainConnectionID != NULL) &&
            (&CGSGetActiveSpace != NULL) &&
            (&CGSCopyManagedDisplaySpaces != NULL);
+}
+
+static bool env_flag_enabled(const char *name) {
+    const char *value = getenv(name);
+    if (!value) {
+        return false;
+    }
+    return !strcmp(value, "1") ||
+           !strcasecmp(value, "true") ||
+           !strcasecmp(value, "yes") ||
+           !strcasecmp(value, "on");
+}
+
+static bool preferences_flag_enabled(CFStringRef key) {
+    CFPropertyListRef value = CFPreferencesCopyAppValue(key, kCFPreferencesCurrentApplication);
+    if (!value) {
+        value = CFPreferencesCopyAppValue(key, CFSTR("com.interversehq.InstantSpaceSwitcher"));
+    }
+
+    bool enabled = false;
+    if (value) {
+        if (CFGetTypeID(value) == CFBooleanGetTypeID()) {
+            enabled = CFBooleanGetValue((CFBooleanRef)value);
+        } else if (CFGetTypeID(value) == CFStringGetTypeID()) {
+            enabled = CFStringCompare((CFStringRef)value, CFSTR("true"), kCFCompareCaseInsensitive) == kCFCompareEqualTo ||
+                      CFStringCompare((CFStringRef)value, CFSTR("1"), 0) == kCFCompareEqualTo ||
+                      CFStringCompare((CFStringRef)value, CFSTR("yes"), kCFCompareCaseInsensitive) == kCFCompareEqualTo;
+        }
+        CFRelease(value);
+    }
+
+    return enabled;
+}
+
+static void iss_load_gesture_options(void) {
+    gestureLoggingEnabled = env_flag_enabled("ISS_GESTURE_LOGGING") ||
+                            preferences_flag_enabled(CFSTR("ISSGestureLoggingEnabled"));
+    gestureCompletionEnabled = env_flag_enabled("ISS_GESTURE_COMPLETION") ||
+                               preferences_flag_enabled(CFSTR("ISSGestureCompletionEnabled"));
+    if (!gestureLog) {
+        gestureLog = os_log_create("com.interversehq.InstantSpaceSwitcher", "gesture");
+    }
+}
+
+static void iss_reset_gesture_tracker(void) {
+    memset(&gestureTracker, 0, sizeof(gestureTracker));
+    gestureTracker.state = ISSGestureStateIdle;
+    gestureTracker.direction = ISSDirectionLeft;
+}
+
+static const char *gesture_state_name(ISSGestureTrackingState state) {
+    switch (state) {
+    case ISSGestureStateIdle:
+        return "idle";
+    case ISSGestureStateTrackingCandidate:
+        return "trackingCandidate";
+    case ISSGestureStateTrackingSpaceSwipe:
+        return "trackingSpaceSwipe";
+    case ISSGestureStateFinishing:
+        return "finishing";
+    case ISSGestureStateCooldown:
+        return "cooldown";
+    }
+    return "unknown";
+}
+
+static void gesture_transition(ISSGestureTrackingState state, double timestamp, const char *reason) {
+    if (gestureTracker.state != state && gestureLoggingEnabled && gestureLog) {
+        os_log_info(gestureLog, "state %{public}s -> %{public}s reason=%{public}s",
+                    gesture_state_name(gestureTracker.state),
+                    gesture_state_name(state),
+                    reason);
+    }
+    gestureTracker.state = state;
+    gestureTracker.lastTimestamp = timestamp;
+}
+
+static bool gesture_direction_from_snapshot(double progress,
+                                            double velocityX,
+                                            int64_t flags,
+                                            ISSDirection *direction) {
+    if (fabs(progress) >= 0.04) {
+        *direction = progress > 0 ? ISSDirectionRight : ISSDirectionLeft;
+        return true;
+    }
+    if (fabs(velocityX) >= 40.0) {
+        *direction = velocityX > 0 ? ISSDirectionRight : ISSDirectionLeft;
+        return true;
+    }
+    if (flags == 0 || flags == 1) {
+        *direction = flags ? ISSDirectionRight : ISSDirectionLeft;
+        return true;
+    }
+    return false;
+}
+
+static bool gesture_is_space_swipe_candidate(CGSEventType cgsType,
+                                             int64_t hidType,
+                                             int64_t motion,
+                                             double progress,
+                                             double velocityX) {
+    if (cgsType == kCGSEventDockControl && hidType == kIOHIDEventTypeDockSwipe) {
+        return motion == 0 || motion == kCGGestureMotionHorizontal || fabs(progress) > 0.0 || fabs(velocityX) > 0.0;
+    }
+
+    return false;
+}
+
+static bool gesture_is_neutral_interstitial(CGSEventType cgsType,
+                                            int64_t hidType,
+                                            int64_t phase,
+                                            double progress,
+                                            double velocityX,
+                                            double velocityY,
+                                            int64_t flags,
+                                            int64_t motion) {
+    return cgsType == kCGSEventGesture &&
+           hidType == 0 &&
+           phase == kCGSGesturePhaseNone &&
+           fabs(progress) == 0.0 &&
+           fabs(velocityX) == 0.0 &&
+           fabs(velocityY) == 0.0 &&
+           flags == 0 &&
+           motion == 0;
+}
+
+static bool iss_handle_gesture_snapshot(CGSEventType cgsType,
+                                        int64_t hidType,
+                                        int64_t phase,
+                                        double progress,
+                                        double velocityX,
+                                        double velocityY,
+                                        int64_t flags,
+                                        int64_t motion,
+                                        double timestamp) {
+    if (!gestureLoggingEnabled && !gestureCompletionEnabled) {
+        return false;
+    }
+
+    bool candidate = gesture_is_space_swipe_candidate(cgsType, hidType, motion, progress, velocityX);
+    ISSDirection direction = gestureTracker.direction;
+    bool hasDirection = gesture_direction_from_snapshot(progress, velocityX, flags, &direction);
+    bool neutralInterstitial = gesture_is_neutral_interstitial(cgsType,
+                                                              hidType,
+                                                              phase,
+                                                              progress,
+                                                              velocityX,
+                                                              velocityY,
+                                                              flags,
+                                                              motion);
+
+    if (neutralInterstitial && gestureTracker.state != ISSGestureStateIdle) {
+        return false;
+    }
+
+    if (gestureLoggingEnabled && gestureLog && (candidate || gestureTracker.state != ISSGestureStateIdle)) {
+        os_log_debug(gestureLog,
+                     "event cgs=%u hid=%lld phase=%lld progress=%{public}.3f vx=%{public}.1f vy=%{public}.1f flags=%lld motion=%lld candidate=%{public}d dir=%{public}s state=%{public}s",
+                     cgsType,
+                     hidType,
+                     phase,
+                     progress,
+                     velocityX,
+                     velocityY,
+                     flags,
+                     motion,
+                     candidate,
+                     hasDirection ? (direction == ISSDirectionRight ? "right" : "left") : "unknown",
+                     gesture_state_name(gestureTracker.state));
+    }
+
+    if (timestamp < gestureTracker.selfInjectionUntil) {
+        return false;
+    }
+
+    if (gestureTracker.state == ISSGestureStateCooldown) {
+        if (timestamp < gestureTracker.cooldownUntil) {
+            return false;
+        }
+        gesture_transition(ISSGestureStateIdle, timestamp, "cooldownExpired");
+    }
+
+    if (!candidate) {
+        if (gestureTracker.state == ISSGestureStateTrackingCandidate ||
+            gestureTracker.state == ISSGestureStateTrackingSpaceSwipe) {
+            gesture_transition(ISSGestureStateIdle, timestamp, "nonCandidate");
+        }
+        return false;
+    }
+
+    if (phase == kCGSGesturePhaseBegan || phase == kCGSGesturePhaseMayBegin) {
+        gestureTracker.direction = hasDirection ? direction : gestureTracker.direction;
+        gestureTracker.lastProgress = progress;
+        gestureTracker.lastVelocityX = velocityX;
+        gesture_transition(ISSGestureStateTrackingCandidate, timestamp, "began");
+        return false;
+    }
+
+    if (phase == kCGSGesturePhaseChanged || phase == kCGSGesturePhaseNone) {
+        if (hasDirection) {
+            gestureTracker.direction = direction;
+        }
+        gestureTracker.lastProgress = progress;
+        gestureTracker.lastVelocityX = velocityX;
+        if (gestureTracker.state == ISSGestureStateIdle) {
+            gesture_transition(ISSGestureStateTrackingCandidate, timestamp, "changedFromIdle");
+        }
+        if (hasDirection && (fabs(progress) >= 0.08 || fabs(velocityX) >= 80.0)) {
+            gesture_transition(ISSGestureStateTrackingSpaceSwipe, timestamp, "stableDirection");
+        }
+        return false;
+    }
+
+    if (phase != kCGSGesturePhaseEnded && phase != kCGSGesturePhaseCancelled) {
+        return false;
+    }
+
+    if (hasDirection) {
+        gestureTracker.direction = direction;
+    }
+
+    double effectiveProgress = fabs(progress) >= fabs(gestureTracker.lastProgress) ? progress : gestureTracker.lastProgress;
+    double absProgress = fabs(effectiveProgress);
+    bool wasTracking = gestureTracker.state == ISSGestureStateTrackingCandidate ||
+                       gestureTracker.state == ISSGestureStateTrackingSpaceSwipe;
+    bool progressQualifies = absProgress >= 0.15 && absProgress < 1.20;
+
+    if (!gestureCompletionEnabled || !wasTracking || !hasDirection || !progressQualifies) {
+        gesture_transition(ISSGestureStateCooldown, timestamp, "endedNoCompletion");
+        gestureTracker.cooldownUntil = timestamp + 0.15;
+        return false;
+    }
+
+    ISSSpaceInfo info;
+    bool canMove = iss_get_space_info(&info) && iss_can_move(info, gestureTracker.direction);
+    if (!canMove) {
+        gesture_transition(ISSGestureStateCooldown, timestamp, "blockedByBounds");
+        gestureTracker.cooldownUntil = timestamp + 0.20;
+        return false;
+    }
+
+    unsigned int targetIndex = info.currentIndex;
+    if (gestureTracker.direction == ISSDirectionRight) {
+        targetIndex++;
+    } else {
+        targetIndex--;
+    }
+
+    gestureTracker.selfInjectionUntil = timestamp + 0.08;
+    gesture_transition(ISSGestureStateFinishing, timestamp, "injectFinish");
+    bool posted = iss_post_finish_gesture(gestureTracker.direction);
+    gestureTracker.completionCount += posted ? 1 : 0;
+    if (posted) {
+        iss_post_gesture_completion_notification(targetIndex);
+    }
+    gestureTracker.cooldownUntil = timestamp + (posted ? 0.08 : 0.20);
+    gesture_transition(ISSGestureStateCooldown, timestamp, posted ? "postedFinish" : "postFailed");
+    return posted;
 }
 
 static bool extract_space_info_from_display(CFDictionaryRef displayDict,
@@ -148,6 +480,14 @@ static bool extract_space_info_from_display(CFDictionaryRef displayDict,
 }
 
 static bool load_space_info_for_display(ISSSpaceInfo *info, bool useCursorDisplay) {
+    if (testingEnabled) {
+        if (!info || testingSpaceInfo.spaceCount == 0) {
+            return false;
+        }
+        *info = testingSpaceInfo;
+        return true;
+    }
+
     if (!cgs_symbols_available()) {
         fprintf(stderr, "ISS: required CGS symbols missing\n");
         return false;
@@ -271,7 +611,20 @@ bool iss_can_move(ISSSpaceInfo info, ISSDirection direction) {
 }
 
 static bool iss_post_switch_gesture(ISSDirection direction) {
+    if (testingEnabled) {
+        if (iss_should_block_switch(&testingSpaceInfo, direction)) {
+            return false;
+        }
+        if (direction == ISSDirectionRight) {
+            testingSpaceInfo.currentIndex++;
+        } else {
+            testingSpaceInfo.currentIndex--;
+        }
+        return true;
+    }
+
     const bool isRight = (direction == ISSDirectionRight);
+    gestureTracker.selfInjectionUntil = CFAbsoluteTimeGetCurrent() + 0.08;
 
     // ScrollGestureFlagBits seem to mark direction (anything non-zero)
     int32_t scrollGestureFlagDirection = isRight ? 1 : 0;
@@ -344,12 +697,52 @@ static bool iss_post_switch_gesture(ISSDirection direction) {
     return true;
 }
 
+static bool iss_post_finish_gesture(ISSDirection direction) {
+    return iss_post_switch_gesture(direction);
+}
+
+static void iss_post_gesture_completion_notification(unsigned int targetIndex) {
+    CFNumberRef targetIndexValue = CFNumberCreate(NULL, kCFNumberIntType, &targetIndex);
+    if (!targetIndexValue) {
+        return;
+    }
+
+    const void *keys[] = { CFSTR("targetIndex") };
+    const void *values[] = { targetIndexValue };
+    CFDictionaryRef userInfo = CFDictionaryCreate(NULL,
+                                                  keys,
+                                                  values,
+                                                  1,
+                                                  &kCFTypeDictionaryKeyCallBacks,
+                                                  &kCFTypeDictionaryValueCallBacks);
+    CFRelease(targetIndexValue);
+    if (!userInfo) {
+        return;
+    }
+
+    CFNotificationCenterPostNotification(CFNotificationCenterGetLocalCenter(),
+                                         CFSTR("com.interversehq.InstantSpaceSwitcher.gestureDidComplete"),
+                                         NULL,
+                                         userInfo,
+                                         true);
+    CFRelease(userInfo);
+}
+
 bool iss_init(void) {
     if (globalTap) {
         return true;
     }
 
-    CGEventMask mask = CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp);
+    iss_load_gesture_options();
+    iss_reset_gesture_tracker();
+
+    CGEventMask mask = CGEventMaskBit(kCGEventKeyDown) |
+                       CGEventMaskBit(kCGEventKeyUp) |
+                       CGEventMaskBit(kCGEventScrollWheel) |
+                       CGEventMaskBit(kCGSEventZoom) |
+                       CGEventMaskBit(kCGSEventGesture) |
+                       CGEventMaskBit(kCGSEventDockControl) |
+                       CGEventMaskBit(kCGSEventFluidTouchGesture);
     globalTap = CGEventTapCreate(
         kCGSessionEventTap,
         kCGHeadInsertEventTap,
@@ -381,6 +774,7 @@ void iss_destroy(void) {
         CFRelease(globalTap);
         globalTap = NULL;
     }
+    iss_reset_gesture_tracker();
 }
 
 bool iss_get_space_info(ISSSpaceInfo *info) {
@@ -450,4 +844,70 @@ bool iss_switch_to_index(unsigned int targetIndex) {
     }
 
     return !outOfBounds;
+}
+
+void iss_testing_enable(void) {
+    testingEnabled = true;
+    testingSpaceInfo.currentIndex = 0;
+    testingSpaceInfo.spaceCount = 1;
+    gestureLoggingEnabled = false;
+    gestureCompletionEnabled = false;
+    iss_reset_gesture_tracker();
+}
+
+void iss_testing_disable(void) {
+    testingEnabled = false;
+    testingSpaceInfo.currentIndex = 0;
+    testingSpaceInfo.spaceCount = 0;
+    gestureLoggingEnabled = false;
+    gestureCompletionEnabled = false;
+    iss_reset_gesture_tracker();
+}
+
+bool iss_testing_set_space_state(unsigned int currentIndex, unsigned int spaceCount) {
+    if (!testingEnabled || spaceCount == 0 || currentIndex >= spaceCount) {
+        return false;
+    }
+    testingSpaceInfo.currentIndex = currentIndex;
+    testingSpaceInfo.spaceCount = spaceCount;
+    return true;
+}
+
+void iss_testing_set_gesture_options(bool loggingEnabled, bool completionEnabled) {
+    gestureLoggingEnabled = loggingEnabled;
+    gestureCompletionEnabled = completionEnabled;
+    if (!gestureLog) {
+        gestureLog = os_log_create("com.interversehq.InstantSpaceSwitcher", "gesture");
+    }
+}
+
+void iss_testing_reset_gesture_state(void) {
+    iss_reset_gesture_tracker();
+}
+
+bool iss_testing_handle_gesture_event(int cgsType,
+                                      int hidType,
+                                      int phase,
+                                      double progress,
+                                      double velocityX,
+                                      int flags,
+                                      int motion,
+                                      double timestamp) {
+    return iss_handle_gesture_snapshot((CGSEventType)cgsType,
+                                       hidType,
+                                       phase,
+                                       progress,
+                                       velocityX,
+                                       0,
+                                       flags,
+                                       motion,
+                                       timestamp);
+}
+
+unsigned int iss_testing_completion_count(void) {
+    return gestureTracker.completionCount;
+}
+
+int iss_testing_gesture_state(void) {
+    return gestureTracker.state;
 }

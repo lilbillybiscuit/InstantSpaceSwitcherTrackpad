@@ -61,4 +61,23 @@ bool iss_can_move(ISSSpaceInfo info, ISSDirection direction);
  */
 bool iss_switch_to_index(unsigned int targetIndex);
 
+/**
+ * @brief Test-only mode that avoids private system calls and mutates an in-memory space state.
+ */
+void iss_testing_enable(void);
+void iss_testing_disable(void);
+bool iss_testing_set_space_state(unsigned int currentIndex, unsigned int spaceCount);
+void iss_testing_set_gesture_options(bool loggingEnabled, bool completionEnabled);
+void iss_testing_reset_gesture_state(void);
+bool iss_testing_handle_gesture_event(int cgsType,
+                                      int hidType,
+                                      int phase,
+                                      double progress,
+                                      double velocityX,
+                                      int flags,
+                                      int motion,
+                                      double timestamp);
+unsigned int iss_testing_completion_count(void);
+int iss_testing_gesture_state(void);
+
 #endif /* ISS_h */

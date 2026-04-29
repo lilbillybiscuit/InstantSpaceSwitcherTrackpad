@@ -3,6 +3,30 @@ import ApplicationServices
 import Combine
 import ISS
 
+private let gestureDidCompleteNotificationName =
+  "com.interversehq.InstantSpaceSwitcher.gestureDidComplete"
+private let gestureCompletionTargetIndexKey = "targetIndex"
+
+private func gestureCompletionObserverCallback(
+  center: CFNotificationCenter?,
+  observer: UnsafeMutableRawPointer?,
+  name: CFNotificationName?,
+  object: UnsafeRawPointer?,
+  userInfo: CFDictionary?
+) {
+  guard let observer, let userInfo else { return }
+
+  let appDelegate = Unmanaged<AppDelegate>.fromOpaque(observer).takeUnretainedValue()
+  let notificationInfo = userInfo as NSDictionary
+  guard let targetIndex = notificationInfo[gestureCompletionTargetIndexKey] as? NSNumber else {
+    return
+  }
+
+  Task { @MainActor in
+    appDelegate.handleGestureCompletion(targetIndex: targetIndex.uint32Value)
+  }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
   private let menuBarController = MenuBarController()
@@ -11,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var cancellables = Set<AnyCancellable>()
   private var spaceChangeObserver: Any?
   private var appActivationObserver: Any?
+  private var isObservingGestureCompletions = false
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     ensureAccessibilityPermission()
@@ -25,6 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     bindHotkeys()
     observeSpaceChanges()
     observeAppActivation()
+    observeGestureCompletions()
     refreshSpaceInfo()
   }
 
@@ -32,6 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     iss_destroy()
     stopObservingSpaceChanges()
     stopObservingAppActivation()
+    stopObservingGestureCompletions()
   }
 
   private func ensureAccessibilityPermission() {
@@ -255,6 +282,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     OSDWindow.shared.show(message: "\(index + 1)")
   }
 
+  fileprivate func handleGestureCompletion(targetIndex: UInt32) {
+    refreshSpaceInfo()
+    menuBarController.scheduleRefresh(after: 0.1)
+    OSDWindow.shared.show(message: "\(targetIndex + 1)")
+  }
+
   private func refreshSpaceInfo() {
     var info = ISSSpaceInfo()
     if iss_get_menubar_space_info(&info) {
@@ -272,8 +305,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       queue: .main
     ) { [weak self] _ in
       guard let self else { return }
-      self.refreshSpaceInfo()
-      self.menuBarController.scheduleRefresh(after: 0.2)
+      Task { @MainActor in
+        self.refreshSpaceInfo()
+        self.menuBarController.scheduleRefresh(after: 0.2)
+      }
     }
   }
 
@@ -291,7 +326,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       object: nil,
       queue: .main
     ) { [weak self] _ in
-      self?.menuBarController.scheduleRefresh(after: 0.1)
+      Task { @MainActor in
+        self?.menuBarController.scheduleRefresh(after: 0.1)
+      }
     }
   }
 
@@ -300,6 +337,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       NSWorkspace.shared.notificationCenter.removeObserver(observer)
       appActivationObserver = nil
     }
+  }
+
+  private func observeGestureCompletions() {
+    guard !isObservingGestureCompletions else { return }
+
+    CFNotificationCenterAddObserver(
+      CFNotificationCenterGetLocalCenter(),
+      Unmanaged.passUnretained(self).toOpaque(),
+      gestureCompletionObserverCallback,
+      gestureDidCompleteNotificationName as CFString,
+      nil,
+      .deliverImmediately
+    )
+    isObservingGestureCompletions = true
+  }
+
+  private func stopObservingGestureCompletions() {
+    guard isObservingGestureCompletions else { return }
+
+    CFNotificationCenterRemoveObserver(
+      CFNotificationCenterGetLocalCenter(),
+      Unmanaged.passUnretained(self).toOpaque(),
+      CFNotificationName(gestureDidCompleteNotificationName as CFString),
+      nil
+    )
+    isObservingGestureCompletions = false
   }
 }
 
